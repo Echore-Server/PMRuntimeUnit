@@ -119,6 +119,7 @@ abstract class TestCase {
 			if ($queue->isEmpty()) {
 				$caseEnd = hrtime(true);
 				$logger->logTestCaseFinish($caseName, $caseStart, $caseEnd);
+				$this->cleanup();
 				$future->complete(new TestCaseResult($tests, $succeeds, $failureReasons));
 
 				return;
@@ -188,6 +189,10 @@ abstract class TestCase {
 		}
 
 		return $list;
+	}
+
+	public function cleanup(): void {
+
 	}
 
 	private function runTestFunction(ReflectionMethod $method): ?TestCaseFailureReason {
