@@ -79,7 +79,8 @@ class TestCaseLogger extends PrefixedLogger {
 	}
 
 	public function logAssertionResult(TestCaseAssertionResult $result): void {
-		$this->info(TextFormat::GOLD . "- {$result->constraint->name}: {$result->constraint->verbose(...$result->victims)} ($result->message): " . ($result->passed ? (TextFormat::GREEN . "PASS") : (TextFormat::RED . "FAIL")));
+		$hasMessage = strlen($result->message) > 0;
+		$this->info(TextFormat::GOLD . "- {$result->constraint->name}: $result->fileAndLine" . ($hasMessage ? " ($result->message)" : "") . ": " . ($result->passed ? (TextFormat::GREEN . "PASS") : (TextFormat::RED . "FAIL")));
 	}
 
 	public function logTestCaseFuncFail(string $caseName, string $funcName, float $startNS, float $endNS, TestCaseFailureReason $reason): void {

@@ -35,6 +35,8 @@ abstract class TestCase {
 
 	private int $currentTick;
 
+	private ?TestCaseFailureReason $failureReason;
+
 	public function getServer(): Server {
 		return Server::getInstance();
 	}
@@ -51,8 +53,49 @@ abstract class TestCase {
 	 */
 	public function trigger(int $tick): void {
 		if (isset($this->tickTriggers[$tick])) {
-			($this->tickTriggers[$tick])();
+			$this->failureReason = $this->invokeTestFunction($this->tickTriggers[$tick]);
+
+			if ($this->failureReason !== null) {
+				$this->tickTriggers[$tick + 1] = $this->tickTriggers[$this->currentDuration + 1]; // weird hack again
+				unset($this->tickTriggers[$this->currentDuration + 1]);
+			}
 		}
+	}
+
+	private function invokeTestFunction(ReflectionMethod|callable $method): ?TestCaseFailureReason {
+		try {
+			if (is_callable($method)) {
+				$method();
+			} else {
+				$method->invoke($this);
+			}
+		} catch (ReflectionException $e) {
+			throw new RuntimeException();
+		} catch (TestCaseFailureException $e) {
+			return $e->getReason();
+		} catch (Throwable $e) {
+			if (isset($this->exceptionAssertions[$e::class])) {
+				unset($this->exceptionAssertions[$e::class]);
+				$this->pass(Constraint::EXCEPTION_THROWN, "", [$e::class], null);
+			} else {
+				$this->thrownExceptions[] = $e;
+
+				return new TestCaseFailureReason("None", "Exception was thrown", null);
+			}
+		}
+
+		return null;
+	}
+
+	private function pass(Constraint $constraint, string $message, array $victims, ?array $backtrace): void {
+		$this->currentAssertionResults[] = new TestCaseAssertionResult(
+			$constraint,
+			$message,
+			$victims,
+			true,
+			$backtrace !== null ? TestCaseAssertionResult::fetchFileAndLineFromBacktrace($backtrace) : "",
+			$backtrace !== null ? TestCaseAssertionResult::fetchCodeFromBacktrace($backtrace) : "",
+		);
 	}
 
 	public function runTests(TestCaseLogger $logger): TestCaseFuture {
@@ -87,9 +130,9 @@ abstract class TestCase {
 			$tests++;
 			$logger->logRunTestCaseFunc($caseName, $funcName);
 			$start = hrtime(true);
-			$failureReason = $this->runTestFunction($method);
+			$this->runTestFunction($method);
 
-			$complete = function() use ($logger, &$tests, &$succeeds, &$failureReasons, $failureReason, $start, $caseName, $funcName, $next): void {
+			$complete = function() use ($logger, &$tests, &$succeeds, &$failureReasons, $start, $caseName, $funcName, $next): void {
 				if (empty($this->currentAssertionResults)) {
 					$logger->logTestCaseFuncWarn($caseName, $funcName, "Ended with zero assertions");
 				}
@@ -100,12 +143,12 @@ abstract class TestCase {
 					$logger->logException($e);
 				}
 
-				if ($failureReason === null) {
+				if ($this->failureReason === null) {
 					$logger->logTestCaseFuncPass($caseName, $funcName, $start, $end);
 					$succeeds++;
 				} else {
-					$logger->logTestCaseFuncFail($caseName, $funcName, $start, $end, $failureReason);
-					$failureReasons[] = $failureReason;
+					$logger->logTestCaseFuncFail($caseName, $funcName, $start, $end, $this->failureReason);
+					$failureReasons[] = $this->failureReason;
 				}
 
 				$logger->logAllAssertionResult($this->assertionResults[$funcName] ?? []);
@@ -154,33 +197,9 @@ abstract class TestCase {
 		$this->currentDuration = 0;
 		$this->currentTick = 0;
 		$this->tickTriggers = [];
+		$this->failureReason = null;
 
-		return $this->invokeTestFunction($method);
-	}
-
-	private function invokeTestFunction(ReflectionMethod $method): ?TestCaseFailureReason {
-		try {
-			$method->invoke($this);
-		} catch (ReflectionException $e) {
-			throw new RuntimeException();
-		} catch (TestCaseFailureException $e) {
-			return $e->getReason();
-		} catch (Throwable $e) {
-			if (isset($this->exceptionAssertions[$e::class])) {
-				unset($this->exceptionAssertions[$e::class]);
-				$this->pass(Constraint::EXCEPTION_THROWN, "", [$e::class]);
-			} else {
-				$this->thrownExceptions[] = $e;
-
-				return new TestCaseFailureReason("None", "Exception was thrown", null);
-			}
-		}
-
-		return null;
-	}
-
-	private function pass(Constraint $constraint, string $message, array $victims): void {
-		$this->currentAssertionResults[] = new TestCaseAssertionResult($constraint, $message, $victims, true);
+		return $this->failureReason = $this->invokeTestFunction($method);
 	}
 
 	public function reset(): void {
@@ -207,37 +226,55 @@ abstract class TestCase {
 	}
 
 	protected function assertNotNull(mixed $var, string $message = ""): void {
-		$this->assertThat($var !== null, Constraint::IS_NOT_NULL, $message, [$var]);
+		$this->assertThat($var !== null, Constraint::IS_NOT_NULL, $message, [$var], $this->getAssertionBacktrace());
 	}
 
-	private function assertThat(bool $passed, Constraint $constraint, string $message, array $victims): void {
+	private function assertThat(bool $passed, Constraint $constraint, string $message, array $victims, ?array $backtrace): void {
 		if ($passed) {
-			$this->pass($constraint, $message, $victims);
+			$this->pass($constraint, $message, $victims, $backtrace);
 		} else {
-			$this->failure($constraint, $message, $victims);
+			$this->failure($constraint, $message, $victims, $backtrace);
 		}
 	}
 
-	private function failure(Constraint $constraint, string $message, array $victims): void {
-		$this->currentAssertionResults[] = $assertionResult = new TestCaseAssertionResult($constraint, $message, $victims, false);
+	private function failure(Constraint $constraint, string $message, array $victims, ?array $backtrace): void {
+		$this->currentAssertionResults[] = $assertionResult = new TestCaseAssertionResult(
+			$constraint,
+			$message,
+			$victims,
+			false,
+			$backtrace !== null ? TestCaseAssertionResult::fetchFileAndLineFromBacktrace($backtrace) : "",
+			$backtrace !== null ? TestCaseAssertionResult::fetchCodeFromBacktrace($backtrace) : "",
+		);
 
 		throw new TestCaseFailureException(new TestCaseFailureReason($constraint->description(), $message, $assertionResult));
 	}
 
+	private function getAssertionBacktrace(): array {
+		return debug_backtrace(limit: 2)[1];
+	}
+
 	protected function assertNull(mixed $var, string $message = ""): void {
-		$this->assertThat($var === null, Constraint::IS_NULL, $message, [$var]);
+		$this->assertThat($var === null, Constraint::IS_NULL, $message, [$var], $this->getAssertionBacktrace());
 	}
 
 	protected function assertTrue(mixed $var, string $message = ""): void {
-		$this->assertThat($var === true, Constraint::IS_TRUE, $message, [$var]);
+		$this->assertThat($var === true, Constraint::IS_TRUE, $message, [$var], $this->getAssertionBacktrace());
 	}
 
 	protected function assertFalse(mixed $var, string $message = ""): void {
-		$this->assertThat($var === false, Constraint::IS_FALSE, $message, [$var]);
+		$this->assertThat($var === false, Constraint::IS_FALSE, $message, [$var], $this->getAssertionBacktrace());
 	}
 
-	private function failureReturnReason(Constraint $constraint, string $message, array $victims): TestCaseFailureReason {
-		$this->currentAssertionResults[] = $assertionResult = new TestCaseAssertionResult($constraint, $message, $victims, false);
+	private function failureReturnReason(Constraint $constraint, string $message, array $victims, ?array $backtrace): TestCaseFailureReason {
+		$this->currentAssertionResults[] = $assertionResult = new TestCaseAssertionResult(
+			$constraint,
+			$message,
+			$victims,
+			false,
+			$backtrace !== null ? TestCaseAssertionResult::fetchFileAndLineFromBacktrace($backtrace) : "",
+			$backtrace !== null ? TestCaseAssertionResult::fetchCodeFromBacktrace($backtrace) : "",
+		);
 
 		return new TestCaseFailureReason($constraint->description(), $message, $assertionResult);
 	}
