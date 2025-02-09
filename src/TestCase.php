@@ -42,8 +42,8 @@ abstract class TestCase {
 	}
 
 	public function incrementTick(): void {
-		$this->currentTick++;
 		$this->trigger($this->currentTick);
+		$this->currentTick++;
 	}
 
 	/**
